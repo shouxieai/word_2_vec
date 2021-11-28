@@ -1,0 +1,7 @@
+my_word2vec.py : 模型训练
+stopwords.txt : 停用词表
+test_word2vec.py : 训练后的测试文件
+Word2vec.pdf : 手写稿
+word2vec.pkl: 训练结束之后的参数
+手写AI.jpg : 添加微信,进群交流, 精品课程全部免费
+数学原始数据.csv : 训练文本
