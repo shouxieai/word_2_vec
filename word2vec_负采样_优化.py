@@ -1,117 +1,125 @@
-import pandas as pd
-import jieba
-import numpy as np
-import re
-from tqdm import tqdm
 import pickle
+import jieba
+import pandas as pd
+from tqdm import tqdm
+import numpy as np
 
 
-def get_data(file = "new_data.txt"):
-    with open(file,encoding='utf-8') as f:
-        datas = f.read().split("\n")
+# 当前词语 预测其他词语
+def clean_info(X):  # 需要传入X和y, 因为文本经过处理之后,有可能为空, 需要删除为空的文本, 此时应该删除对应的y
+    result_x = []
+    stop_words = load_stop_word() + ["\u3000"]
+
+    for index, content in tqdm(enumerate(X)):
+                result_x.append([i for i in jieba.lcut(content) if i not in stop_words])
+    return result_x
+
+def build_word_dict(contents_list):
     word_2_index = {}
-    index_2_word = []
+    index_2_word = {}
 
-    s_table = []
-    for sentence in datas:
-        words = sentence.split(" ")
-        for w in words:
-            if w not in word_2_index:
-                word_2_index[w] = len(word_2_index)
-                index_2_word.append(w)
-            s_table.append(word_2_index[w])
+    n = 0
+    for content in contents_list:
+        for word in content:
+            if word not in word_2_index:
+                word_2_index[word] = word_2_index.get(word,n)
+                n+=1
 
-    return datas , word_2_index,index_2_word,s_table
+    one_hot_result = []
+    for index,key in enumerate(word_2_index):
+        one_hot = [0 for _ in range(len(word_2_index))]
+        one_hot[index] = 1
+        one_hot_result.append(one_hot)
+        index_2_word[index] = key
+    return word_2_index,index_2_word,np.array(one_hot_result,dtype=np.int32).reshape(len(one_hot_result),1,-1)
 
+def load_stop_word(file="stopwords.txt"):
+    return [i.strip() for i in open(file,"r",encoding="utf-8").readlines()]
 
 def softmax(x):
-    max_x = np.sum(x,axis = 1,keepdims = True)
+    if len(x.shape) == 1:
+        x = x.reshape(1,-1)
     ex = np.exp(x)
-    result = ex / np.sum(ex,axis = 1,keepdims = True)
-    return np.clip(result,1e-20,1)
+    return ex / np.sum(ex,axis=1)
 
-def sigmoid(x):
-    x = np.clip(x,-50,50)
-    return 1/(1+np.exp(-x))
+def sigmoid( x):
+    if x > 6:
+        return 1.0
+    elif x < -6:
+        return 0.0
+    else:
+        return 1 / (1 + np.exp(-x))
+
+def build_dict(data_list):
+    word_2_index,index_2_word,word_times = {},{},{}
+    for content in data_list:
+        for word in content:
+            word_times[word] = word_times.get(word,0) + 1
+            if word not in word_2_index:
+                now_index =  len(word_2_index)
+                word_2_index[word] = word_2_index.get(word,now_index)
+                index_2_word[now_index] = word
+    vec = []
+    for word,times in word_times.items():
+        word_index = word_2_index[word]
+        for i in range(times):
+            vec.append(word_index)
+    return word_2_index,index_2_word,vec
 
 
-def make_samples(sentence,index):
+def sampling(table, count):
+    indices = np.random.randint(low=0, high=len(table), size=count)
+    return [table[i] for i in indices]
 
-    global word_2_index,corpus_len, neg_rate,s_table
-
-    now_word_index = word_2_index[sentence[index]] # [ ]
-
-    other_words = sentence[max(0, index - n_gram): index] + sentence[index + 1: index + n_gram + 1]
-    other_words_index = [word_2_index[i] for i in other_words]
-
-    # all_neg_index = [i for i in range(corpus_len) if i not in other_words_index + [now_word_index]]
-    # s_table
-    t = np.random.randint(0,len(s_table),size = (neg_rate*len(other_words_index)))
-    t = [i for i in t if i not in other_words_index + [now_word_index]]
-
-
-    samples = [ ]
-
-    for i in other_words_index:
-        samples.append((now_word_index,i,1))
-
-    for i in t:
-        samples.append((now_word_index,s_table[i],0))
-
-    return pro_samples(samples)
-
-def pro_samples(samples):
-
-    # now_word_index = []
-    other_word_index = []
-    label = []
-    for sample in samples:
-        # now_word_index.append(sample[0])
-        other_word_index.append(sample[1])
-        label.append(sample[2])
-    return samples[0][0],other_word_index,np.array(label).reshape(1,-1)
+def get_sample_tuple(now_word,other_words,neg_nums,word_2_index,table):
+    result = []
+    now_word_index = word_2_index[now_word]
+    for other_word in other_words:
+        other_word_index = word_2_index[other_word]
+        result.append((now_word_index,other_word_index,1))
+        samples = sampling(table,neg_nums)
+        for s in samples:
+            if s == now_word_index or s == other_word_index:
+                continue
+            result.append((now_word_index,s,0))
+    return result
 
 if __name__ == "__main__":
-    all_datas, word_2_index,index_2_word,s_table = get_data()
+    # np.random.seed(7)
 
-    corpus_len = len(word_2_index)
-    embedding_num = 50
-    epoch = 4
+    data_math = pd.read_csv("数学原始数据.csv", encoding='gbk', header=None)[0].values
+    data_math = clean_info(data_math)
+    word_2_index, index_2_word, table = build_dict(data_math)
+
+    word_size = len(word_2_index)
+    feature_num = 50
+
+    n_gram = 4
+    negative_num = 5
     lr = 0.01
-    n_gram = 3
-    neg_rate = 5
+    epochs = 4
 
-    w1 = np.random.normal(0,1,size = (corpus_len,embedding_num))
+    w1 = np.random.normal(size=(word_size, feature_num))
+    w2 = np.random.normal(size=(feature_num, word_size))
 
-    w2 = np.random.normal(0,1,size = w1.T.shape)
+    for e in range(epochs):
+        for content in tqdm(data_math):
+            for index,word in enumerate(content):
+                other_words = content[max(0, index - n_gram):index] + content[index + 1: index + 1 + n_gram]
+                samples = get_sample_tuple(word,other_words,negative_num,word_2_index,table)
 
-    # skip_gram
-    for e in range(epoch):
-        for sentence in tqdm(all_datas):
-            sentence =sentence.split(" ")
-            for now_idx_sent,now_word in enumerate(sentence):
+                for now_word_index,other_word_index,is_context in samples:
+                    h = 1 * w1[now_word_index]
+                    p = h @ w2[:,other_word_index]
+                    predict = sigmoid(p)
 
-                now_word_index,other_word_index,label = make_samples(sentence,now_idx_sent)
+                    G2 = predict - is_context
+                    delta_w2 = h.T * G2
 
-                # for now_word_index,other_word_index,label in samples:
-                hidden = 1 *  w1[None,now_word_index]
-                pre = hidden @ w2[:,other_word_index]
+                    G1 = G2 *  w2[:,other_word_index].T
+                    delta_w1 = 1 * G1
 
-                pro = sigmoid(pre)
+                    w2[:, other_word_index] -= lr * delta_w2
+                    w1[now_word_index] -= lr * delta_w1
 
-                # loss = -np.sum(label * np.log(pro) + (1-label) * np.log(1-pro))
-
-                G2 = pro - label
-                delta_w2 = hidden.T @ G2
-
-                G1 = G2 @ w2[:,other_word_index].T
-                delta_w1 = G1
-
-                w1[None,now_word_index] -= lr * delta_w1
-                w2[:,other_word_index] -= lr * delta_w2 / len(label)
-
-    with open("vec.pkl2","wb") as f:
-        pickle.dump([w1,w2,word_2_index,index_2_word],f)
-
-
-
+    pickle.dump([w1, word_2_index, index_2_word, w2], open("_负采样_.pkl", "wb"))
